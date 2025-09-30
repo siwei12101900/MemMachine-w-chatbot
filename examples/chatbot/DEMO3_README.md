@@ -2,6 +2,19 @@
 
 Uses the **combined `/v1/memories` endpoint** to leverage both episodic AND profile memory.
 
+## ⚠️ IMPORTANT: Known Bug
+
+**This demo currently triggers a bug in MemMachine's profile memory!**
+
+**Symptoms**:
+- HTTP 500 errors when storing memories
+- Error: `AttributeError: 'tuple' object has no attribute 'removeprefix'`
+- Very slow response times (15-20 seconds)
+
+**✅ Solution**: Use **demo2.py** instead, which uses episodic-only endpoints and works perfectly.
+
+See [PROFILE_MEMORY_BUG.md](PROFILE_MEMORY_BUG.md) for full details and workarounds.
+
 ## Key Difference from Demo 2
 
 | Feature | Demo 2 | Demo 3 |

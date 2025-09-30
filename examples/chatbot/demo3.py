@@ -4,8 +4,13 @@ MemMachine Chatbot Demo 3
 Demonstrates memory-powered conversations using BOTH episodic and profile memory.
 Uses the combined /v1/memories endpoint instead of episodic-only.
 
-This demo showcases how MemMachine extracts long-term facts (profile memory)
-from conversations while maintaining episodic context.
+⚠️ KNOWN ISSUE: This demo currently triggers a bug in MemMachine's profile memory
+that causes 500 errors and slow responses. See PROFILE_MEMORY_BUG.md for details.
+
+✅ RECOMMENDED: Use demo2.py instead, which uses episodic-only endpoints and works perfectly.
+
+This demo showcases how MemMachine SHOULD extract long-term facts (profile memory)
+from conversations while maintaining episodic context (when the bug is fixed).
 """
 
 import os
