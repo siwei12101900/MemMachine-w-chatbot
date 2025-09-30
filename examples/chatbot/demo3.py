@@ -4,13 +4,13 @@ MemMachine Chatbot Demo 3
 Demonstrates memory-powered conversations using BOTH episodic and profile memory.
 Uses the combined /v1/memories endpoint instead of episodic-only.
 
-⚠️ KNOWN ISSUE: This demo currently triggers a bug in MemMachine's profile memory
-that causes 500 errors and slow responses. See PROFILE_MEMORY_BUG.md for details.
+✅ PROFILE MEMORY IS NOW WORKING!
 
-✅ RECOMMENDED: Use demo2.py instead, which uses episodic-only endpoints and works perfectly.
+This demo showcases how MemMachine extracts long-term facts (profile memory)
+from conversations while maintaining episodic context.
 
-This demo showcases how MemMachine SHOULD extract long-term facts (profile memory)
-from conversations while maintaining episodic context (when the bug is fixed).
+Note: Profile memory operations can take 30-60 seconds due to fact extraction.
+The increased timeout allows these operations to complete successfully.
 """
 
 import os
@@ -73,7 +73,7 @@ class MemMachineChatbotFull:
             print(f"      REST API: POST {endpoint}")
         
         try:
-            response = requests.post(endpoint, json=episode_data, timeout=30)
+            response = requests.post(endpoint, json=episode_data, timeout=60)  # Increased for profile memory
             elapsed = time.time() - start_time
             
             if verbose:
@@ -104,7 +104,7 @@ class MemMachineChatbotFull:
             print(f"      REST API: POST {endpoint}")
         
         try:
-            response = requests.post(endpoint, json=search_data, timeout=30)
+            response = requests.post(endpoint, json=search_data, timeout=60)  # Increased for profile memory
             elapsed = time.time() - start_time
             
             if verbose:

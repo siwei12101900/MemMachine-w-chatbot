@@ -115,7 +115,7 @@ class MemMachineChatbot:
             response = requests.post(
                 endpoint,
                 json=episode_data,
-                timeout=30
+                timeout=60  # Increased for profile memory operations
             )
             
             elapsed = time.time() - start_time
@@ -175,7 +175,7 @@ class MemMachineChatbot:
             response = requests.post(
                 endpoint,
                 json=search_data,
-                timeout=30
+                timeout=60  # Increased for profile memory operations
             )
             
             elapsed = time.time() - start_time
@@ -248,7 +248,7 @@ class MemMachineChatbot:
             List of session dictionaries
         """
         try:
-            response = requests.get(f"{self.base_url}/v1/sessions", timeout=30)
+            response = requests.get(f"{self.base_url}/v1/sessions", timeout=60)
             if response.status_code == 200:
                 data = response.json()
                 return data.get("sessions", [])
@@ -274,7 +274,7 @@ class MemMachineChatbot:
             response = requests.delete(
                 f"{self.base_url}/v1/memories",
                 json=delete_data,
-                timeout=30
+                timeout=60
             )
             
             if response.status_code == 200:
