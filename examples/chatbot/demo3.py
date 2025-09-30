@@ -43,10 +43,10 @@ class MemMachineChatbotFull:
     
     def _create_session_data(self):
         return {
-            "user_id": [self.user_id],
+            "user_id": [self.user_id],  # List of user IDs
             "session_id": self.session_id,
-            "agent_id": [self.agent_id],
-            "group_id": None
+            "agent_id": [self.agent_id],  # List of agent IDs
+            "group_id": self.user_id  # String, not None!
         }
     
     def store_message(self, content: str, producer: str, produced_for: str, verbose: bool = False):

@@ -61,10 +61,10 @@ class MemMachineChatbot:
     def _create_session_data(self) -> Dict[str, Any]:
         """Create session data structure."""
         return {
-            "user_id": [self.user_id],
+            "user_id": [self.user_id],  # List of user IDs
             "session_id": self.session_id,
-            "agent_id": [self.agent_id],
-            "group_id": None
+            "agent_id": [self.agent_id],  # List of agent IDs
+            "group_id": self.user_id  # String, not None!
         }
     
     def add_memory(
