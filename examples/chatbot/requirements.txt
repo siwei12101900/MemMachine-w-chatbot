@@ -1,0 +1,6 @@
+# MemMachine Chatbot Requirements
+requests>=2.31.0
+
+# Optional: For LLM integration
+openai>=1.0.0
+
