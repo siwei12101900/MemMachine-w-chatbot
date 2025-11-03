@@ -15,6 +15,10 @@ class EmbedderBuilder(Builder):
     Builder for Embedder instances.
     """
 
+    # Do not type hint with SentenceTransformer to avoid importing it unnecessarily
+    # Long-term solution is to refactor to use dependency injection
+    _embedders: dict[str, Any] = {}
+
     @staticmethod
     def get_dependency_ids(name: str, config: dict[str, Any]) -> set[str]:
         dependency_ids: set[str] = set()
@@ -31,6 +35,13 @@ class EmbedderBuilder(Builder):
         name: str, config: dict[str, Any], injections: dict[str, Any]
     ) -> Embedder:
         match name:
+            case "amazon-bedrock":
+                from .amazon_bedrock_embedder import (
+                    AmazonBedrockEmbedder,
+                    AmazonBedrockEmbedderConfig,
+                )
+
+                return AmazonBedrockEmbedder(AmazonBedrockEmbedderConfig(**config))
             case "openai":
                 from .openai_embedder import OpenAIEmbedder
 
@@ -38,9 +49,7 @@ class EmbedderBuilder(Builder):
                 if injected_metrics_factory_id is None:
                     injected_metrics_factory = None
                 elif not isinstance(injected_metrics_factory_id, str):
-                    raise TypeError(
-                        "metrics_factory_id must be a string if provided"
-                    )
+                    raise TypeError("metrics_factory_id must be a string if provided")
                 else:
                     injected_metrics_factory = injections.get(
                         injected_metrics_factory_id
@@ -51,9 +60,7 @@ class EmbedderBuilder(Builder):
                             f"{injected_metrics_factory_id} "
                             "not found in injections"
                         )
-                    elif not isinstance(
-                        injected_metrics_factory, MetricsFactory
-                    ):
+                    elif not isinstance(injected_metrics_factory, MetricsFactory):
                         raise TypeError(
                             "Injected dependency with id "
                             f"{injected_metrics_factory_id} "
@@ -64,11 +71,42 @@ class EmbedderBuilder(Builder):
                     {
                         "model": config.get("model", "text-embedding-3-small"),
                         "api_key": config["api_key"],
+                        "dimensions": config.get("dimensions"),
                         "metrics_factory": injected_metrics_factory,
-                        "user_metrics_labels": config.get(
-                            "user_metrics_labels", {}
+                        "max_retry_interval_seconds": config.get(
+                            "max_retry_interval_seconds", 120
                         ),
+                        "base_url": config.get("base_url"),
+                        "user_metrics_labels": config.get("user_metrics_labels", {}),
                     }
+                )
+            case "sentence-transformer":
+                from sentence_transformers import SentenceTransformer
+
+                from .sentence_transformer_embedder import (
+                    SentenceTransformerEmbedder,
+                    SentenceTransformerEmbedderParams,
+                )
+
+                model_name = config.get("model")
+                if model_name is None:
+                    raise ValueError(
+                        "'model' must be provided for sentence-transformer"
+                    )
+                if not isinstance(model_name, str):
+                    raise TypeError("model_name must be a string")
+
+                if model_name not in EmbedderBuilder._embedders:
+                    EmbedderBuilder._embedders["model_name"] = SentenceTransformer(
+                        model_name
+                    )
+
+                embedder = EmbedderBuilder._embedders["model_name"]
+
+                return SentenceTransformerEmbedder(
+                    SentenceTransformerEmbedderParams(
+                        model_name=model_name, sentence_transformer=embedder
+                    )
                 )
             case _:
                 raise ValueError(f"Unknown Embedder name: {name}")

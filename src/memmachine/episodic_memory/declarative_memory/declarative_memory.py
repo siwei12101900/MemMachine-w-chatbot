@@ -13,6 +13,7 @@ from string import Template
 from typing import Any, Self, cast
 from uuid import uuid4
 
+from memmachine.common.data_types import ExternalServiceAPIError
 from memmachine.common.embedder.embedder import Embedder
 from memmachine.common.reranker.reranker import Reranker
 from memmachine.common.vector_graph_store import Edge, Node, VectorGraphStore
@@ -83,16 +84,14 @@ class DeclarativeMemory:
                     (default: "[$timestamp] $content").
         """
 
-        self._vector_graph_store: VectorGraphStore = config[
-            "vector_graph_store"
-        ]
+        self._vector_graph_store: VectorGraphStore = config["vector_graph_store"]
 
         self._embedder: Embedder = config["embedder"]
         self._reranker: Reranker = config["reranker"]
 
-        self._related_episode_postulators: list[RelatedEpisodePostulator] = (
-            config["related_episode_postulators"]
-        )
+        self._related_episode_postulators: list[RelatedEpisodePostulator] = config[
+            "related_episode_postulators"
+        ]
         self._query_derivative_deriver: DerivativeDeriver = config[
             "query_derivative_deriver"
         ]
@@ -106,9 +105,7 @@ class DeclarativeMemory:
                     config["related_episode_postulator"],
                 ),
                 subworkflows=[
-                    build_derivative_derivation_workflow(
-                        derivative_derivation_workflow
-                    )
+                    build_derivative_derivation_workflow(derivative_derivation_workflow)
                     for derivative_derivation_workflow in config[
                         "derivative_derivation_workflows"
                     ]
@@ -125,9 +122,7 @@ class DeclarativeMemory:
                     config["derivative_deriver"],
                 ),
                 subworkflows=[
-                    build_derivative_mutation_workflow(
-                        derivative_mutation_workflow
-                    )
+                    build_derivative_mutation_workflow(derivative_mutation_workflow)
                     for derivative_mutation_workflow in config[
                         "derivative_mutation_workflows"
                     ]
@@ -209,9 +204,7 @@ class DeclarativeMemory:
 
             if self._callback is not None:
                 if subworkflow_results:
-                    return await self._callback(
-                        execution_result, subworkflow_results
-                    )
+                    return await self._callback(execution_result, subworkflow_results)
                 else:
                     return await self._callback(execution_result)
 
@@ -272,16 +265,12 @@ class DeclarativeMemory:
             derivative_mutator.mutate(derivative, episode_cluster)
             for derivative in derivatives
         ]
-        derivatives_mutated_derivatives = await asyncio.gather(
-            *mutate_derivative_tasks
-        )
+        derivatives_mutated_derivatives = await asyncio.gather(*mutate_derivative_tasks)
 
         # Flatten into a single list of mutated derivatives.
         mutated_derivatives = [
             derivative
-            for derivative_mutated_derivatives in (
-                derivatives_mutated_derivatives
-            )
+            for derivative_mutated_derivatives in (derivatives_mutated_derivatives)
             for derivative in derivative_mutated_derivatives
         ]
         return mutated_derivatives
@@ -297,13 +286,10 @@ class DeclarativeMemory:
         try:
             mutated_derivative_embeddings = await self._embedder.ingest_embed(
                 [derivative.content for derivative in mutated_derivatives],
-                max_attempts=3
+                max_attempts=3,
             )
-        except (ValueError, IOError) as e:
-            logger.error(
-                "Failed to create embeddings for mutated derivatives %s",
-                str(e)
-            )
+        except (ExternalServiceAPIError, ValueError, RuntimeError):
+            logger.error("Failed to create embeddings for mutated derivatives")
             return []
 
         mutated_derivative_nodes = [
@@ -312,7 +298,10 @@ class DeclarativeMemory:
                 labels={"Derivative"},
                 properties={
                     "content": derivative.content,
-                    "embedding": derivative_embedding,
+                    DeclarativeMemory._embedding_property_name(
+                        self._embedder.model_id,
+                        self._embedder.dimensions,
+                    ): derivative_embedding,
                     "timestamp": derivative.timestamp,
                     "user_metadata": json.dumps(derivative.user_metadata),
                 }
@@ -368,9 +357,7 @@ class DeclarativeMemory:
                 }
                 | {
                     mangle_filterable_property_key(key): value
-                    for key, value in (
-                        episode_cluster.filterable_properties.items()
-                    )
+                    for key, value in (episode_cluster.filterable_properties.items())
                 }
             ),
         )
@@ -500,7 +487,7 @@ class DeclarativeMemory:
         self,
         query: str,
         num_episodes_limit: int = 20,
-        filterable_properties: dict[str, FilterablePropertyValue] = {},
+        property_filter: dict[str, FilterablePropertyValue] = {},
     ) -> list[Episode]:
         """
         Search declarative memory for episodes relevant to the query.
@@ -511,7 +498,7 @@ class DeclarativeMemory:
             num_episodes_limit (int, optional):
                 The maximum number
                 of episodes to return (default: 20).
-            filterable_properties (
+            property_filter (
                 dict[str, FilterablePropertyValue], optional
             ):
                 Filterable property keys and values to use
@@ -541,18 +528,30 @@ class DeclarativeMemory:
         )
 
         # Embed derivatives.
-        derivative_embeddings = await self._embedder.search_embed(
-            [derivative.content for derivative in derivatives]
-        )
+        try:
+            derivative_embeddings = await self._embedder.search_embed(
+                [derivative.content for derivative in derivatives],
+                max_attempts=3,
+            )
+        except (ExternalServiceAPIError, ValueError, RuntimeError):
+            logger.error("Failed to create embeddings for query derivatives")
+            return []
 
         # Search graph store for vector matches.
         search_similar_nodes_tasks = [
             self._vector_graph_store.search_similar_nodes(
                 query_embedding=derivative_embedding,
+                embedding_property_name=(
+                    DeclarativeMemory._embedding_property_name(
+                        self._embedder.model_id,
+                        self._embedder.dimensions,
+                    )
+                ),
+                similarity_metric=self._embedder.similarity_metric,
                 required_labels={"Derivative"},
                 required_properties={
                     mangle_filterable_property_key(key): value
-                    for key, value in filterable_properties.items()
+                    for key, value in property_filter.items()
                 },
                 include_missing_properties=True,
             )
@@ -561,9 +560,7 @@ class DeclarativeMemory:
 
         matched_derivative_nodes = [
             similar_node
-            for similar_nodes in await asyncio.gather(
-                *search_similar_nodes_tasks
-            )
+            for similar_nodes in await asyncio.gather(*search_similar_nodes_tasks)
             for similar_node in similar_nodes
         ]
 
@@ -577,7 +574,7 @@ class DeclarativeMemory:
                 required_labels={"EpisodeCluster"},
                 required_properties={
                     mangle_filterable_property_key(key): value
-                    for key, value in filterable_properties.items()
+                    for key, value in property_filter.items()
                 },
                 include_missing_properties=True,
             )
@@ -607,7 +604,7 @@ class DeclarativeMemory:
                 required_labels={"Episode"},
                 required_properties={
                     mangle_filterable_property_key(key): value
-                    for key, value in filterable_properties.items()
+                    for key, value in property_filter.items()
                 },
             )
             for matched_episode_cluster_node in matched_episode_cluster_nodes
@@ -631,7 +628,7 @@ class DeclarativeMemory:
         expand_episode_node_contexts_tasks = [
             self._expand_episode_node_context(
                 nuclear_episode_node,
-                filterable_properties=filterable_properties,
+                property_filter=property_filter,
             )
             for nuclear_episode_node in nuclear_episode_nodes
         ]
@@ -680,7 +677,7 @@ class DeclarativeMemory:
         self,
         nucleus_episode_node: Node,
         retrieval_depth_limit: int = 1,
-        filterable_properties: dict[str, FilterablePropertyValue] = {},
+        property_filter: dict[str, FilterablePropertyValue] = {},
     ) -> set[Node]:
         """
         Expand the context of a nucleus episode node
@@ -700,7 +697,7 @@ class DeclarativeMemory:
                     required_labels={"Episode"},
                     required_properties={
                         mangle_filterable_property_key(key): value
-                        for key, value in filterable_properties.items()
+                        for key, value in property_filter.items()
                     },
                 )
                 for frontier_node in frontier
@@ -729,9 +726,7 @@ class DeclarativeMemory:
         based on their relevance to the query.
         """
         contexts_episodes = [
-            DeclarativeMemory._episodes_from_episode_nodes(
-                list(episode_node_context)
-            )
+            DeclarativeMemory._episodes_from_episode_nodes(list(episode_node_context))
             for episode_node_context in episode_node_contexts
         ]
 
@@ -793,9 +788,7 @@ class DeclarativeMemory:
         unified_episode_node_context: set[Node] = set()
 
         for nucleus, context in anchored_episode_node_contexts:
-            if (
-                len(unified_episode_node_context) + len(context)
-            ) <= num_episodes_limit:
+            if (len(unified_episode_node_context) + len(context)) <= num_episodes_limit:
                 # It is impossible that the context exceeds the limit.
                 unified_episode_node_context.update(context)
             else:
@@ -835,22 +828,20 @@ class DeclarativeMemory:
         """
         await self._vector_graph_store.clear_data()
 
-    async def forget_isolated_episodes(
+    async def forget_filtered_episodes(
         self,
-        filterable_properties: dict[str, FilterablePropertyValue] = {},
+        property_filter: dict[str, FilterablePropertyValue] = {},
     ):
         """
         Forget all episodes matching the given filterable properties
         and data derived from them.
         """
-        matching_episode_nodes = (
-            await self._vector_graph_store.search_matching_nodes(
-                required_labels={"Episode"},
-                required_properties={
-                    mangle_filterable_property_key(key): value
-                    for key, value in filterable_properties.items()
-                },
-            )
+        matching_episode_nodes = await self._vector_graph_store.search_matching_nodes(
+            required_labels={"Episode"},
+            required_properties={
+                mangle_filterable_property_key(key): value
+                for key, value in property_filter.items()
+            },
         )
 
         search_related_episode_cluster_nodes_tasks = [
@@ -874,9 +865,7 @@ class DeclarativeMemory:
             for episode_node_related_episode_cluster_nodes in (
                 episode_nodes_related_episode_cluster_nodes
             )
-            for episode_cluster_node in (
-                episode_node_related_episode_cluster_nodes
-            )
+            for episode_cluster_node in (episode_node_related_episode_cluster_nodes)
         ]
 
         search_related_derivative_nodes_tasks = [
@@ -900,24 +889,15 @@ class DeclarativeMemory:
             for episode_cluster_node_related_derivative_nodes in (
                 episode_cluster_nodes_related_derivative_nodes
             )
-            for derivative_node in (
-                episode_cluster_node_related_derivative_nodes
-            )
+            for derivative_node in (episode_cluster_node_related_derivative_nodes)
         ]
 
         episode_uuids = [node.uuid for node in matching_episode_nodes]
-        episode_cluster_uuids = [
-            node.uuid for node in matching_episode_cluster_nodes
-        ]
+        episode_cluster_uuids = [node.uuid for node in matching_episode_cluster_nodes]
         derivative_uuids = [node.uuid for node in matching_derivative_nodes]
 
-        node_uuids_to_delete = (
-            episode_uuids + episode_cluster_uuids + derivative_uuids
-        )
+        node_uuids_to_delete = episode_uuids + episode_cluster_uuids + derivative_uuids
         await self._vector_graph_store.delete_nodes(node_uuids_to_delete)
-
-    async def close(self):
-        await self._vector_graph_store.close()
 
     @staticmethod
     def _episodes_from_episode_nodes(
@@ -951,9 +931,22 @@ class DeclarativeMemory:
                     for key, value in node.properties.items()
                     if is_mangled_filterable_property_key(key)
                 },
-                user_metadata=json.loads(
-                    cast(str, node.properties["user_metadata"])
-                ),
+                user_metadata=json.loads(cast(str, node.properties["user_metadata"])),
             )
             for node in episode_nodes
         ]
+
+    @staticmethod
+    def _embedding_property_name(model_id: str, dimensions: int) -> str:
+        """
+        Generate a standardized property name for embeddings
+        based on the model ID and embedding dimensions.
+
+        Args:
+            model_id (str): The identifier of the embedding model.
+            dimensions (int): The dimensionality of the embedding.
+
+        Returns:
+            str: A standardized property name for the embedding.
+        """
+        return f"embedding_{model_id}_{dimensions}d"

@@ -6,11 +6,14 @@ import asyncio
 import logging
 import time
 from typing import Any
+from uuid import uuid4
 
 import openai
 
+from memmachine.common.data_types import ExternalServiceAPIError
 from memmachine.common.metrics_factory.metrics_factory import MetricsFactory
 
+from .data_types import SimilarityMetric
 from .embedder import Embedder
 
 logger = logging.getLogger(__name__)
@@ -34,11 +37,20 @@ class OpenAIEmbedder(Embedder):
                 - model (str, optional):
                   Name of the OpenAI embedding model to use
                   (default: "text-embedding-3-small").
+                - dimensions (int | None, optional):
+                  Dimensionality of the embedding vectors,
+                  if different from the model's default
+                  (default: None).
+                - base_url (str, optional):
+                  Base URL of the OpenAI embedding model to use.
                 - metrics_factory (MetricsFactory, optional):
                   An instance of MetricsFactory
                   for collecting usage metrics.
                 - user_metrics_labels (dict[str, str], optional):
                   Labels to attach to the collected metrics.
+                - max_retry_interval_seconds(int, optional):
+                  Maximal retry interval in seconds
+                  (default: 120).
 
         Raises:
             ValueError:
@@ -48,21 +60,71 @@ class OpenAIEmbedder(Embedder):
         """
         super().__init__()
 
-        self._model = config.get("model", "text-embedding-3-small")
-
         api_key = config.get("api_key")
-        if api_key is None:
-            raise ValueError("Embedder API key must be provided")
+        if not isinstance(api_key, str):
+            raise TypeError("Embedder API key must be a string")
 
-        self._client = openai.AsyncOpenAI(api_key=api_key)
+        model = config.get("model", "text-embedding-3-small")
+        if not isinstance(model, str):
+            raise TypeError("Model name must be a string")
+
+        self._model = model
+
+        temp_client = openai.OpenAI(api_key=api_key, base_url=config.get("base_url"))
+
+        # https://platform.openai.com/docs/guides/embeddings#embedding-models
+        dimensions = config.get("dimensions")
+        if dimensions is None:
+            # Get dimensions by embedding a dummy string.
+            response = temp_client.embeddings.create(
+                input="\n",
+                model=self._model,
+            )
+            dimensions = len(response.data[0].embedding)
+            self._use_dimensions_parameter = False
+        else:
+            if not isinstance(dimensions, int):
+                raise TypeError("Dimensions must be an integer")
+            if dimensions <= 0:
+                raise ValueError("Dimensions must be positive")
+
+            # Validate dimensions by embedding a dummy string.
+            try:
+                response = temp_client.embeddings.create(
+                    input="\n",
+                    model=self._model,
+                    dimensions=dimensions,
+                )
+                self._use_dimensions_parameter = True
+            except openai.OpenAIError:
+                response = temp_client.embeddings.create(
+                    input="\n",
+                    model=self._model,
+                )
+                self._use_dimensions_parameter = False
+
+            if len(response.data[0].embedding) != dimensions:
+                raise ValueError(
+                    f"Invalid dimensions {dimensions} for model {self._model}"
+                )
+
+        self._dimensions = dimensions
+
+        self._client = openai.AsyncOpenAI(
+            api_key=api_key, base_url=config.get("base_url")
+        )
 
         metrics_factory = config.get("metrics_factory")
         if metrics_factory is not None and not isinstance(
             metrics_factory, MetricsFactory
         ):
-            raise TypeError(
-                "Metrics factory must be an instance of MetricsFactory"
-            )
+            raise TypeError("Metrics factory must be an instance of MetricsFactory")
+
+        self._max_retry_interval_seconds = config.get("max_retry_interval_seconds", 120)
+        if not isinstance(self._max_retry_interval_seconds, int):
+            raise TypeError("max_retry_interval_seconds must be an integer")
+        if self._max_retry_interval_seconds <= 0:
+            raise ValueError("max_retry_interval_seconds must be a positive integer")
 
         self._collect_metrics = False
         if metrics_factory is not None:
@@ -89,68 +151,108 @@ class OpenAIEmbedder(Embedder):
     async def ingest_embed(
         self,
         inputs: list[Any],
-        max_attempts: int = 1
+        max_attempts: int = 1,
     ) -> list[list[float]]:
         return await self._embed(inputs, max_attempts)
 
     async def search_embed(
         self,
         queries: list[Any],
-        max_attempts: int = 1
+        max_attempts: int = 1,
     ) -> list[list[float]]:
         return await self._embed(queries, max_attempts)
 
     async def _embed(
-            self,
-            inputs: list[Any],
-            max_attempts: int = 1) -> list[list[float]]:
+        self,
+        inputs: list[Any],
+        max_attempts: int = 1,
+    ) -> list[list[float]]:
         if not inputs:
             return []
         if max_attempts <= 0:
             raise ValueError("max_attempts must be a positive integer")
 
-        inputs = [
-            input.replace("\n", " ") if input else "\n" for input in inputs
-        ]
+        inputs = [input.replace("\n", " ") if input else "\n" for input in inputs]
+
+        embed_call_uuid = uuid4()
 
         start_time = time.monotonic()
+
         sleep_seconds = 1
-        for attempt in range(max_attempts):
-            sleep_seconds *= 2
+        for attempt in range(1, max_attempts + 1):
             try:
-                response = await self._client.embeddings.create(
-                    input=inputs, model=self._model
+                logger.debug(
+                    "[call uuid: %s] "
+                    "Attempting to create embeddings using %s OpenAI model: "
+                    "on attempt %d with max attempts %d",
+                    embed_call_uuid,
+                    self._model,
+                    attempt,
+                    max_attempts,
                 )
-            # translate vendor specific exeception to common error
-            # for rate limit and timeout error, may retry the request
-            except openai.AuthenticationError as e:
-                raise ValueError("Invalid OpenAI API key") from e
-            except openai.RateLimitError as e:
-                logger.warning("OpenAI rate limit exceeded")
-                if attempt + 1 >= max_attempts:
-                    raise IOError("OpenAI rate limit exceeded") from e
-                await asyncio.sleep(sleep_seconds)
+                response = (
+                    await self._client.embeddings.create(
+                        input=inputs,
+                        model=self._model,
+                        dimensions=self._dimensions,
+                    )
+                    if self._use_dimensions_parameter
+                    else await self._client.embeddings.create(
+                        input=inputs,
+                        model=self._model,
+                    )
+                )
+                break
+            except (
+                openai.RateLimitError,
+                openai.APITimeoutError,
+                openai.APIConnectionError,
+            ) as e:
+                # Exception may be retried.
+                if attempt >= max_attempts:
+                    error_message = (
+                        f"[call uuid: {embed_call_uuid}] "
+                        "Giving up creating embeddings "
+                        f"after failed attempt {attempt} "
+                        f"due to retryable {type(e).__name__}: "
+                        f"max attempts {max_attempts} reached"
+                    )
+                    logger.error(error_message)
+                    raise ExternalServiceAPIError(error_message)
+
+                logger.info(
+                    "[call uuid: %s] "
+                    "Retrying creating embeddings in %d seconds "
+                    "after failed attempt %d due to retryable %s...",
+                    embed_call_uuid,
+                    sleep_seconds,
+                    attempt,
+                    type(e).__name__,
+                )
+                await asyncio.sleep(
+                    min(sleep_seconds, self._max_retry_interval_seconds)
+                )
+                sleep_seconds *= 2
                 continue
-            except openai.APITimeoutError as e:
-                logger.warning("OpenAI API timeout")
-                if attempt + 1 >= max_attempts:
-                    raise IOError("OpenAI API timeout") from e
-                await asyncio.sleep(sleep_seconds)
-                continue
-            except openai.APIConnectionError as e:
-                logger.warning("OpenAI API connection error")
-                if attempt + 1 >= max_attempts:
-                    raise IOError("OpenAI API connection error") from e
-                await asyncio.sleep(sleep_seconds)
-                continue
-            except openai.BadRequestError as e:
-                raise ValueError("OpenAI invalid request") from e
-            except openai.APIError as e:
-                raise ValueError("OpenAI API error") from e
-            except openai.OpenAIError as e:
-                raise ValueError("OpenAI error") from e
-            break
+            except (openai.APIError, openai.OpenAIError) as e:
+                error_message = (
+                    f"[call uuid: {embed_call_uuid}] "
+                    "Giving up creating embeddings "
+                    f"after failed attempt {attempt} "
+                    f"due to non-retryable {type(e).__name__}"
+                )
+                logger.error(error_message)
+                if isinstance(e, openai.APIError):
+                    raise ExternalServiceAPIError(error_message)
+                else:
+                    raise RuntimeError(error_message)
+
         end_time = time.monotonic()
+        logger.debug(
+            "[call uuid: %s] Embeddings created in %.3f seconds",
+            embed_call_uuid,
+            end_time - start_time,
+        )
 
         if self._collect_metrics:
             self._prompt_tokens_usage_counter.increment(
@@ -167,3 +269,16 @@ class OpenAIEmbedder(Embedder):
             )
 
         return [datum.embedding for datum in response.data]
+
+    @property
+    def model_id(self) -> str:
+        return self._model
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    @property
+    def similarity_metric(self) -> SimilarityMetric:
+        # https://platform.openai.com/docs/guides/embeddings
+        return SimilarityMetric.COSINE
